@@ -7,7 +7,7 @@ import numpy as np
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from engicom_backend import (initialize,process,metrics,capability,pareto_data,data_view,errors,export_excel,export_pdf,SCOPES)
+from engicom_backend import (initialize,process,metrics,capability,pareto_data,data_view,errors,export_excel,export_pdf,SCOPES,point_filter_options,point_series)
 
 st.set_page_config(page_title='Reporte NoK | ENGICOM',page_icon='📊',layout='wide')
 st.markdown('''<style>.block-container{padding-top:1.1rem;max-width:1600px}[data-testid="stMetric"]{background:#f2f6fa;border:1px solid #dce5ee;padding:14px;border-radius:12px}h1,h2,h3{letter-spacing:-.02em}</style>''',unsafe_allow_html=True)
@@ -82,6 +82,9 @@ def main():
     try:
         counts=pd.read_sql_query('SELECT line AS Línea,COUNT(*) AS Piezas FROM pieces WHERE nrows>0 GROUP BY line',db)
         st.subheader('Identificación de línea');safe_df(counts,width='stretch',hide_index=True)
+        present=set(counts['Línea']) if not counts.empty else set()
+        if 'Línea 2' not in present:st.warning('No se identificaron piezas de Línea 2. Verifica que sus PDF estén incluidos en la carga y que el Gage ID corresponda al configurado.')
+        if 'Sin identificar' in present:st.warning('Existen piezas sin línea identificada. Revisa el Gage ID y la leyenda del encabezado del PDF.')
         scope=st.radio('Vista de resultados',SCOPES,horizontal=True,index=0)
         summary,reg,ps=metrics(db,scope)
         caps=capability(db,scope)
@@ -89,7 +92,7 @@ def main():
         a,b,c,e,f=st.columns(5)
         a.metric('Piezas analizadas',f'{pieces:,}');b.metric('Piezas OK',f'{good:,}');c.metric('Piezas NOK',f'{bad:,}');e.metric('FTQ',f'{100*good/pieces:.2f}%' if pieces else '—')
         f.metric('Mediciones NOK',f"{int(summary.loc[summary.Metrica.eq('Total de mediciones NOK'),'Valor'].iloc[0]):,}")
-        tabs=st.tabs(['🏁 Ejecutivo','🎯 Pareto','📦 Distribución','📐 Pp / Ppk','🔎 Reportes individuales','📤 Exportar'])
+        tabs=st.tabs(['🏁 Ejecutivo','🎯 Pareto','📦 Distribución','📍 Puntos individuales','📐 Pp / Ppk','🔎 Reportes individuales','📤 Exportar'])
         with tabs[0]:
             l,r=st.columns([1,1.2])
             with l:
@@ -119,6 +122,50 @@ def main():
                     safe_df(df,width='stretch',hide_index=True)
                     if len(df)>=10000:st.caption('Vista limitada a 10,000 mediciones. Los indicadores y exportaciones usan el conjunto completo.')
         with tabs[3]:
+            st.subheader('Tendencia de mediciones individuales por leva o apoyo')
+            st.caption('Datos consultados desde SQLite por característica y elemento. Los límites son los del dibujo de ingeniería.')
+            families=point_filter_options(db,scope)
+            if not families:
+                st.info('No existen mediciones para esta selección.')
+            else:
+                family=st.selectbox('Familia de medición',families,key='pt_family')
+                characteristics=point_filter_options(db,scope,family=family)
+                if characteristics:
+                    characteristic=st.selectbox('Característica',characteristics,key='pt_characteristic')
+                    elements=point_filter_options(db,scope,family=family,characteristic=characteristic)
+                    is_leva=family in ('Levas','chatter Levas')
+                    element_label='Leva' if is_leva else 'Apoyo'
+                    options=['Todos']+elements
+                    selected=st.selectbox(element_label,options,key='pt_element')
+                    max_points=st.select_slider('Puntos visibles por página',options=[100,250,500,1000,2500],value=500)
+                    page=st.number_input('Página de gráfica',min_value=1,value=1,step=1,key='pt_page')
+                    points,total=point_series(db,scope,family,characteristic,None if selected=='Todos' else selected,max_points,(page-1)*max_points)
+                    st.caption(f'Mediciones coincidentes: {total:,} · Mostrando {len(points):,} · Página {page:,}')
+                    if points.empty:
+                        st.info('No hay mediciones en esta página.')
+                    else:
+                        points=points.copy()
+                        points['Orden']=(page-1)*max_points+np.arange(1,len(points)+1)
+                        points['Estado']=points['Resultado'].astype(str).str.lower().map(lambda x:'NOK' if x=='nok' else 'OK')
+                        points['Elemento']=points['Leva' if is_leva else 'Apoyo'].fillna('Sin elemento').astype(str)
+                        fig=px.scatter(points,x='Orden',y='Valor',color='Estado',symbol='Estado',
+                            color_discrete_map={'OK':'#159A80','NOK':'#D9485F'},
+                            hover_data=['Pieza','Archivo','Linea','Elemento','Area','LSL','USL'],
+                            title=f'{characteristic} · {element_label}: {selected} · {scope}')
+                        fig.update_traces(marker=dict(size=8))
+                        for bound,color in [('LSL','#D97706'),('USL','#DC2626')]:
+                            for val in sorted(points[bound].dropna().unique()):
+                                fig.add_hline(y=float(val),line_dash='dash',line_color=color,
+                                    annotation_text=f'{bound}: {val:g}',annotation_position='top left')
+                        fig.update_layout(height=490,xaxis_title='Secuencia de medición (orden de pieza)',
+                            yaxis_title='Valor medido',legend_title='Resultado',hovermode='closest')
+                        st.plotly_chart(fig,width='stretch')
+                        if selected=='Todos':
+                            st.caption('Selecciona una leva o apoyo específico para evitar mezclar elementos en la misma tendencia.')
+                        safe_df(points[['Pieza','Archivo','Linea','Leva','Apoyo','Valor','LSL','USL','Estado']],width='stretch',hide_index=True)
+                        st.download_button('⬇️ Descargar puntos visibles (CSV)',points.to_csv(index=False).encode('utf-8-sig'),
+                            file_name='ENGICOM_puntos_individuales.csv',mime='text/csv')
+        with tabs[4]:
             st.caption('Pp/Ppk calculados con desviación estándar global muestral. No demuestran estabilidad; valida los límites de ingeniería.')
             areas=['Todas']+sorted(caps.Area.dropna().unique().tolist()) if not caps.empty else ['Todas']
             af=st.selectbox('Filtrar área para capacidad',areas)
@@ -128,13 +175,13 @@ def main():
             if not valid.empty:
                 valid['Grupo']=valid.Area.astype(str)+' · '+valid.Caracteristica.astype(str)
                 fig=px.bar(valid.sort_values('Ppk'),x='Ppk',y='Grupo',orientation='h',color='Ppk',color_continuous_scale='RdYlGn',title='Ppk por característica');fig.add_vline(x=1.33,line_dash='dash',line_color='#15324B');fig.update_layout(height=max(420,len(valid)*25));st.plotly_chart(fig,width='stretch')
-        with tabs[4]:
+        with tabs[5]:
             search=st.text_input('Buscar pieza o nombre de PDF');result=st.selectbox('Resultado',['Todos','Ok','Nok'])
             page=st.number_input('Página de resultados (1,000 mediciones por página)',min_value=1,value=1,step=1)
             v=data_view(db,scope,search=search,result=None if result=='Todos' else result,limit=1000,offset=(page-1)*1000)
             safe_df(v,width='stretch',hide_index=True,height=480)
             st.subheader('Registros NOK');safe_df(data_view(db,scope,result='Nok',limit=1000),width='stretch',hide_index=True,height=300)
-        with tabs[5]:
+        with tabs[6]:
             st.caption('Las exportaciones se generan bajo demanda. Incluyen la línea seleccionada y la columna Línea en Excel.')
             x,y=st.columns(2)
             if x.button('Preparar Excel completo'):

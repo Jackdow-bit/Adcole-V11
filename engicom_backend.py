@@ -29,7 +29,7 @@ def initialize(path):
     db.commit();return db
 
 def classify(text, gage_line1='8377', gage_line2='8375'):
-    m=re.search(r'Gage\s*ID\s*:\s*(\d+)(?:\s*[-–]\s*Line\s*(\d+))?',text,re.I)
+    m=re.search(r'Gage\s*ID\s*:\s*(\d+)(?:\s*[-–—]\s*(?:Line|Línea|Linea)\s*[:#-]?\s*(\d+))?',text,re.I)
     if not m:return 'Sin identificar',''
     gage=m.group(1); explicit=m.group(2)
     if explicit:return 'Línea '+explicit if explicit in ('1','2') else 'Sin identificar',gage
@@ -75,7 +75,7 @@ def process(paths,db,gage_line1='8377',gage_line2='8375',progress=None):
             duplicates+=1;continue
         try:
             with pdfplumber.open(io.BytesIO(blob)) as pdf:
-                header=pdf.pages[0].extract_text() or ''
+                header=(pdf.pages[0].extract_text() or '') + '\n' + ((pdf.pages[1].extract_text() or '')[:600] if len(pdf.pages)>1 else '')
             line,gage=classify(header,gage_line1,gage_line2)
             cursor=db.execute('INSERT INTO pieces(filename,line,gage,digest) VALUES(?,?,?,?)',(filename,line,gage,digest))
             piece=cursor.lastrowid
@@ -180,44 +180,26 @@ def data_view(db,scope,char=None,area=None,result=None,search=None,limit=5000,of
 def errors(db):return pd.read_sql_query('SELECT filename AS Archivo,line AS Línea,gage AS Gage,error AS Error FROM pieces WHERE error IS NOT NULL',db)
 
 def export_excel(db,scope):
-    """Exportación de bajo consumo con resúmenes pivotables por línea, área y característica."""
+    """Excel compacto: solo hojas solicitadas; mediciones escritas en streaming."""
     from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
-    from openpyxl.worksheet.table import Table as ExcelTable, TableStyleInfo
     out=io.BytesIO();wb=Workbook(write_only=True)
     summary,reg,ps=metrics(db,scope);caps=capability(db,scope)
     def frame_sheet(name,df):
         ws=wb.create_sheet(name[:31]);ws.append(list(df.columns))
         for values in df.itertuples(index=False,name=None):
             ws.append([None if pd.isna(x) else x for x in values])
-    # Resúmenes agrupados de tipo tabla dinámica: se regeneran en cada exportación.
-    # Para pivotes nativos editables, usar la hoja Master como fuente en Excel.
-    where_scope='1=1' if scope=='Acumulado' else 'line=?'
-    args=() if scope=='Acumulado' else (scope,)
-    for sheet,groupcols in [('Dinámica Línea',['line']),('Dinámica Área',['line','area']),('Dinámica Característica',['line','area','characteristic']),('Dinámica Familia',['line','family'])]:
-        cols=','.join(groupcols)
-        query=f"""SELECT {cols}, COUNT(*) AS mediciones,
-        SUM(CASE WHEN result='Nok' THEN 1 ELSE 0 END) AS mediciones_nok,
-        COUNT(DISTINCT piece) AS piezas,
-        COUNT(DISTINCT CASE WHEN result='Nok' THEN piece END) AS piezas_nok
-        FROM measurements WHERE {where_scope} AND family!='Chatter Journal Ford'
-        GROUP BY {cols} ORDER BY {cols}"""
-        df=pd.read_sql_query(query,db,params=args)
-        df['FTQ piezas (%)']=((df['piezas']-df['piezas_nok'])/df['piezas'].replace(0,np.nan)*100).round(2)
-        df['Rechazo mediciones (%)']=(df['mediciones_nok']/df['mediciones'].replace(0,np.nan)*100).round(2)
-        df=df.rename(columns={'line':'Línea','area':'Área','characteristic':'Característica','family':'Familia','mediciones':'Mediciones','mediciones_nok':'Mediciones NOK','piezas':'Piezas medidas','piezas_nok':'Piezas NOK en grupo'})
-        frame_sheet(sheet,df)
-    for fam in FAMILIES:
+    for fam in ['Apoyos','Levas','chatter Levas','Chatter apoyos']:
         ws=wb.create_sheet(fam[:31]);ws.append(['Nombre del archivo','Pieza','Línea','Leva','Apoyo','Caracteristica','Medicion','Area','Resultado','Min','Max'])
         for r in db.execute("""SELECT filename,piece,line,leva,apoyo,characteristic,measurement,area,result,lsl,usl
-            FROM measurements WHERE (line=? OR ?='Acumulado') AND family=?""",(scope,scope,fam)):ws.append(r)
-    for name,condition in [('Master',"family!='Chatter Journal Ford'"),('Nok',"family!='Chatter Journal Ford' AND result='Nok'")]:
-        ws=wb.create_sheet(name);ws.append(['Nombre del archivo','Pieza','Línea','Leva','Apoyo','Caracteristica','Medicion','Area','Resultado','Min','Max'])
-        for r in db.execute("""SELECT filename,piece,line,leva,apoyo,characteristic,measurement,area,result,lsl,usl
-            FROM measurements WHERE (line=? OR ?='Acumulado') AND """+condition,(scope,scope)):ws.append(r)
-    frame_sheet('Resumen ejecutivo',summary);frame_sheet('Resumen REG 5',reg);frame_sheet('Pp_Ppk',caps)
-    frame_sheet('Piezas por línea',ps);frame_sheet('Errores',errors(db))
-    frame_sheet('Criterios dibujo',drawing_limits())
+            FROM measurements WHERE (line=? OR ?='Acumulado') AND family=? ORDER BY piece""",(scope,scope,fam)):
+            ws.append(r)
+    ws=wb.create_sheet('Nok');ws.append(['Nombre del archivo','Pieza','Línea','Leva','Apoyo','Caracteristica','Medicion','Area','Resultado','Min','Max'])
+    for r in db.execute("""SELECT filename,piece,line,leva,apoyo,characteristic,measurement,area,result,lsl,usl
+            FROM measurements WHERE (line=? OR ?='Acumulado') AND family!='Chatter Journal Ford' AND result='Nok' ORDER BY piece""",(scope,scope)):
+        ws.append(r)
+    frame_sheet('Resumen ejecutivo',summary)
+    frame_sheet('Resumen REG 5',reg)
+    frame_sheet('Pp_Ppk',caps)
     wb.save(out);out.seek(0);return out.getvalue()
 
 def drawing_limits():
@@ -283,3 +265,31 @@ def export_pdf(db,scope,topn=15):
         fig.suptitle(str(ch));fig.tight_layout();figadd(fig)
     story.append(Paragraph('Pp/Ppk son descriptivos y requieren validar estabilidad y límites de ingeniería vigentes.',styles['Italic']))
     doc.build(story);out.seek(0);return out.getvalue()
+
+
+def point_filter_options(db, scope, family=None, characteristic=None):
+    """Opciones calculadas en SQLite sin leer el conjunto completo."""
+    clauses=[]; args=[]
+    if scope!='Acumulado':clauses.append('line=?');args.append(scope)
+    if family:clauses.append('family=?');args.append(family)
+    if characteristic:clauses.append('characteristic=?');args.append(characteristic)
+    sql=' WHERE '+' AND '.join(clauses) if clauses else ''
+    if not family:
+        return [r[0] for r in db.execute('SELECT DISTINCT family FROM measurements'+sql+' ORDER BY family',args) if r[0]]
+    if not characteristic:
+        return [r[0] for r in db.execute('SELECT DISTINCT characteristic FROM measurements'+sql+' ORDER BY characteristic',args) if r[0]]
+    dimension='leva' if family in ('Levas','chatter Levas') else 'apoyo'
+    return [r[0] for r in db.execute(f'SELECT DISTINCT {dimension} FROM measurements'+sql+f' AND {dimension} IS NOT NULL ORDER BY {dimension}' if clauses else f'SELECT DISTINCT {dimension} FROM measurements WHERE {dimension} IS NOT NULL ORDER BY {dimension}',args)]
+
+
+def point_series(db,scope,family,characteristic,element=None,limit=2500,offset=0):
+    dimension='leva' if family in ('Levas','chatter Levas') else 'apoyo'
+    conditions=['family=?','characteristic=?','measurement IS NOT NULL'];args=[family,characteristic]
+    if scope!='Acumulado':conditions.append('line=?');args.append(scope)
+    if element is not None:conditions.append(f'{dimension}=?');args.append(str(element))
+    where=' AND '.join(conditions)
+    count=db.execute('SELECT COUNT(*) FROM measurements WHERE '+where,args).fetchone()[0]
+    sql='''SELECT piece AS Pieza,filename AS Archivo,line AS Linea,leva AS Leva,apoyo AS Apoyo,
+      measurement AS Valor,result AS Resultado,lsl AS LSL,usl AS USL,area AS Area
+      FROM measurements WHERE '''+where+' ORDER BY piece,rowid LIMIT ? OFFSET ?'
+    return pd.read_sql_query(sql,db,params=args+[int(limit),int(offset)]),count
