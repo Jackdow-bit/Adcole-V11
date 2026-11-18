@@ -122,7 +122,7 @@ def main():
                     safe_df(df,width='stretch',hide_index=True)
                     if len(df)>=10000:st.caption('Vista limitada a 10,000 mediciones. Los indicadores y exportaciones usan el conjunto completo.')
         with tabs[3]:
-            st.subheader('Tendencia de mediciones individuales por leva o apoyo')
+            st.subheader('Tabla de mediciones individuales por leva o apoyo')
             st.caption('Datos consultados desde SQLite por característica y elemento. Los límites son los del dibujo de ingeniería.')
             families=point_filter_options(db,scope)
             if not families:
@@ -138,7 +138,7 @@ def main():
                     options=['Todos']+elements
                     selected=st.selectbox(element_label,options,key='pt_element')
                     max_points=st.select_slider('Puntos visibles por página',options=[100,250,500,1000,2500],value=500)
-                    page=st.number_input('Página de gráfica',min_value=1,value=1,step=1,key='pt_page')
+                    page=st.number_input('Página de tabla',min_value=1,value=1,step=1,key='pt_page')
                     points,total=point_series(db,scope,family,characteristic,None if selected=='Todos' else selected,max_points,(page-1)*max_points)
                     st.caption(f'Mediciones coincidentes: {total:,} · Mostrando {len(points):,} · Página {page:,}')
                     if points.empty:
@@ -148,23 +148,25 @@ def main():
                         points['Orden']=(page-1)*max_points+np.arange(1,len(points)+1)
                         points['Estado']=points['Resultado'].astype(str).str.lower().map(lambda x:'NOK' if x=='nok' else 'OK')
                         points['Elemento']=points['Leva' if is_leva else 'Apoyo'].fillna('Sin elemento').astype(str)
-                        fig=px.scatter(points,x='Orden',y='Valor',color='Estado',symbol='Estado',
+                        points['Caracteristica']=characteristic
+                        table=points[['Orden','Pieza','Archivo','Linea','Area','Elemento','Caracteristica','Valor','LSL','USL','Estado']].copy()
+                        st.dataframe(table,width='stretch',hide_index=True,height=440)
+                        st.download_button('⬇️ Descargar tabla visible (CSV)',table.to_csv(index=False).encode('utf-8-sig'),file_name='ENGICOM_tabla_mediciones.csv',mime='text/csv')
+                        if st.checkbox('Mostrar gráfica de puntos individuales',value=False,key='pt_show_graph'):
+                            fig=px.scatter(points,x='Orden',y='Valor',color='Estado',symbol='Estado',
                             color_discrete_map={'OK':'#159A80','NOK':'#D9485F'},
                             hover_data=['Pieza','Archivo','Linea','Elemento','Area','LSL','USL'],
                             title=f'{characteristic} · {element_label}: {selected} · {scope}')
-                        fig.update_traces(marker=dict(size=8))
-                        for bound,color in [('LSL','#D97706'),('USL','#DC2626')]:
-                            for val in sorted(points[bound].dropna().unique()):
-                                fig.add_hline(y=float(val),line_dash='dash',line_color=color,
-                                    annotation_text=f'{bound}: {val:g}',annotation_position='top left')
-                        fig.update_layout(height=490,xaxis_title='Secuencia de medición (orden de pieza)',
-                            yaxis_title='Valor medido',legend_title='Resultado',hovermode='closest')
-                        st.plotly_chart(fig,width='stretch')
+                            fig.update_traces(marker=dict(size=8))
+                            for bound,color in [('LSL','#D97706'),('USL','#DC2626')]:
+                                for val in sorted(points[bound].dropna().unique()):
+                                    fig.add_hline(y=float(val),line_dash='dash',line_color=color,
+                                        annotation_text=f'{bound}: {val:g}',annotation_position='top left')
+                            fig.update_layout(height=490,xaxis_title='Secuencia de medición (orden de pieza)',
+                                yaxis_title='Valor medido',legend_title='Resultado',hovermode='closest')
+                            st.plotly_chart(fig,width='stretch')
                         if selected=='Todos':
-                            st.caption('Selecciona una leva o apoyo específico para evitar mezclar elementos en la misma tendencia.')
-                        safe_df(points[['Pieza','Archivo','Linea','Leva','Apoyo','Valor','LSL','USL','Estado']],width='stretch',hide_index=True)
-                        st.download_button('⬇️ Descargar puntos visibles (CSV)',points.to_csv(index=False).encode('utf-8-sig'),
-                            file_name='ENGICOM_puntos_individuales.csv',mime='text/csv')
+                            st.caption('Para analizar tendencias comparables, selecciona una leva o apoyo específico.')
         with tabs[4]:
             st.caption('Pp/Ppk calculados con desviación estándar global muestral. No demuestran estabilidad; valida los límites de ingeniería.')
             areas=['Todas']+sorted(caps.Area.dropna().unique().tolist()) if not caps.empty else ['Todas']
